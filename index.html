@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PaperText · 纸页转文字</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Noto+Serif+SC:wght@600;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <style>.page-placeholder{width:46px;height:54px;display:grid;place-items:center;border:1px solid #ddd9d0;background:#f0eee7;color:#96938a;font:11px monospace}</style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><b>P</b><div><strong>PaperText</strong><small>纸页转文字</small></div></div>
+      <nav><a class="active" href="#work">▦　工作台</a><a href="#result">◷　处理记录</a></nav>
+      <div class="privacy"><i>✦</i><strong>本地安全处理</strong><span>无需注册，文件默认只在你的浏览器中识别。</span></div>
+      <footer><em></em> OCR 引擎就绪</footer>
+    </aside>
+    <main id="work">
+      <header><div><label>免费工具 · 无需注册</label><h1>把纸上的故事，<em>还给文字。</em></h1></div><span class="secure">● 安全模式　⌫</span></header>
+      <div class="layout">
+        <section class="content">
+          <div class="upload" id="dropZone">
+            <div class="paper">▤<small>✦</small></div>
+            <div><h2>上传 PDF 或图片</h2><p>支持扫描书页、截图和手机照片，大 PDF 会按页读取，不会一次性占满内存。</p><label class="button" for="fileInput">选择文件</label><input id="fileInput" type="file" accept=".pdf,image/*" multiple hidden><span> PDF · JPG · PNG · WEBP</span></div>
+            <small class="drop">也可以直接拖放到这里</small>
+          </div>
+          <section class="panel">
+            <div class="title"><div><label>01 / SOURCE</label><h2>待处理页面</h2></div><b id="pageCount">0 页</b></div>
+            <div id="queue" class="queue"><div id="empty" class="empty">＋<span>添加文件后，页面会出现在这里</span><small>建议上传清晰、光线均匀的扫描页</small></div></div>
+            <div class="bottom"><span id="summary">还没有添加文件</span><button id="addMore">＋ 添加更多</button></div>
+          </section>
+          <section class="panel" id="result">
+            <div class="title"><div><label>02 / RESULT</label><h2>文字结果</h2></div><div><button id="copy" disabled>复制全文</button><button class="button compact" id="download" disabled>下载 TXT</button></div></div>
+            <div class="meta"><span id="status">等待开始识别</span><span id="chars">0 字</span></div>
+            <textarea id="output" placeholder="识别后的文字会显示在这里，你可以直接校对和编辑。"></textarea>
+          </section>
+        </section>
+        <aside class="settings">
+          <section class="panel">
+            <div class="title"><div><label>CONFIG</label><h2>识别设置</h2></div>☼</div>
+            <label class="field">识别语言<select id="lang"><option value="chi_sim">简体中文</option><option value="chi_tra">繁体中文</option><option value="eng">English</option></select></label>
+            <label class="field">版面模式<select><option>小说排版 · 推荐</option><option>双栏书页</option></select></label>
+            <label class="field">图像增强 <span id="scaleText">清晰</span><input id="scale" type="range" min="1" max="3" value="2"></label>
+            <label class="check"><span><strong>自动去除页眉页脚</strong><small>减少页码与装饰文字干扰</small></span><input id="trim" type="checkbox" checked></label>
+            <label class="check"><span><strong>保留段落缩进</strong><small>按原图坐标还原中文段首</small></span><input id="indent" type="checkbox" checked></label>
+            <button class="recognize" id="recognize" disabled>✦　开始识别</button>
+            <div id="progress" hidden><small id="progressText">准备中…</small><div><i id="bar"></i></div></div>
+          </section>
+          <div class="tip"><b>⌁</b><span><strong>让识别更准确</strong><small>页面尽量平整，文字与背景有明显对比。阴影较重时，先用手机扫描模式拍摄。</small></span></div>
+        </aside>
+      </div>
+    </main>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script type="module" src="app.js?v=20261002-2"></script>
+</body>
+</html>
