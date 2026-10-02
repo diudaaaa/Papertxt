@@ -21,10 +21,9 @@ const copyButton = $("#copy");
 const downloadButton = $("#download");
 
 const MAX_PREVIEW_PAGES = 48;
-const OCR_MAX_PIXELS = 5600000;
 let pages = [];
 let busy = false;
-let worker = null;
+let workers = [];
 
 function setStatus(message) {
   status.textContent = message;
@@ -55,12 +54,22 @@ function imageDataUrl(file) {
   });
 }
 
+function getOcrProfile() {
+  const profiles = {
+    fast: { renderScale: 1.35, maxPixels: 2200000 },
+    balanced: { renderScale: 1.58, maxPixels: 3200000 },
+    quality: { renderScale: 1.82, maxPixels: 5000000 }
+  };
+  return profiles[$("#speed").value] || profiles.fast;
+}
+
 async function renderPdfPage(pdf, pageNumber, scale) {
   const page = await pdf.getPage(pageNumber);
   const baseViewport = page.getViewport({ scale: 1 });
+  const maxPixels = getOcrProfile().maxPixels;
   const requestedPixels = baseViewport.width * baseViewport.height * scale * scale;
-  const safeScale = requestedPixels > OCR_MAX_PIXELS
-    ? scale * Math.sqrt(OCR_MAX_PIXELS / requestedPixels)
+  const safeScale = requestedPixels > maxPixels
+    ? scale * Math.sqrt(maxPixels / requestedPixels)
     : scale;
   const viewport = page.getViewport({ scale: safeScale });
   const canvas = document.createElement("canvas");
@@ -172,19 +181,98 @@ function renderQueue() {
   });
 }
 
+function removeLongLines(image, width, height) {
+  if (!$("#removeLines").checked) return;
+  const darkLimit = 92;
+  const step = Math.max(1, Math.ceil(Math.max(width, height) / 1200));
+  const sampleWidth = Math.ceil(width / step);
+  const sampleHeight = Math.ceil(height / step);
+  const rowSpan = Math.max(18, Math.floor(sampleWidth * 0.34));
+  const colSpan = Math.max(18, Math.floor(sampleHeight * 0.34));
+  const eraseRows = [];
+  const eraseColumns = [];
+
+  for (let y = 0; y < height; y += step) {
+    let run = 0;
+    let longest = 0;
+    let darkCount = 0;
+    for (let x = 0; x < width; x += step) {
+      const value = image.data[(y * width + x) * 4];
+      if (value < darkLimit) {
+        run += 1;
+        darkCount += 1;
+        longest = Math.max(longest, run);
+      } else {
+        run = 0;
+      }
+    }
+    if (longest >= rowSpan && darkCount >= sampleWidth * 0.42) eraseRows.push(y);
+  }
+
+  for (let x = 0; x < width; x += step) {
+    let run = 0;
+    let longest = 0;
+    let darkCount = 0;
+    for (let y = 0; y < height; y += step) {
+      const value = image.data[(y * width + x) * 4];
+      if (value < darkLimit) {
+        run += 1;
+        darkCount += 1;
+        longest = Math.max(longest, run);
+      } else {
+        run = 0;
+      }
+    }
+    if (longest >= colSpan && darkCount >= sampleHeight * 0.42) eraseColumns.push(x);
+  }
+
+  for (const y of eraseRows) {
+    for (let offset = -step; offset <= step; offset += 1) {
+      const row = y + offset;
+      if (row < 0 || row >= height) continue;
+      for (let x = 0; x < width; x += 1) {
+        const index = (row * width + x) * 4;
+        image.data[index] = 255;
+        image.data[index + 1] = 255;
+        image.data[index + 2] = 255;
+      }
+    }
+  }
+
+  for (const x of eraseColumns) {
+    for (let offset = -step; offset <= step; offset += 1) {
+      const column = x + offset;
+      if (column < 0 || column >= width) continue;
+      for (let y = 0; y < height; y += 1) {
+        const index = (y * width + column) * 4;
+        image.data[index] = 255;
+        image.data[index + 1] = 255;
+        image.data[index + 2] = 255;
+      }
+    }
+  }
+}
+
 function prepareImage(source) {
-  const maxDimension = 2600;
-  const ratio = Math.min(1, maxDimension / Math.max(source.width, source.height));
+  const maxPixels = getOcrProfile().maxPixels;
+  const ratio = Math.min(
+    1,
+    2600 / Math.max(source.width, source.height),
+    Math.sqrt(maxPixels / (source.width * source.height))
+  );
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(source.width * ratio));
   canvas.height = Math.max(1, Math.round(source.height * ratio));
   const context = canvas.getContext("2d", { willReadFrequently: true });
   context.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-  const enhancement = Number($("#scale").value);
-  if (enhancement === 1) return canvas;
-
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  removeLongLines(image, canvas.width, canvas.height);
+  const enhancement = Number($("#scale").value);
+  if (enhancement === 1) {
+    context.putImageData(image, 0, 0);
+    return canvas;
+  }
   const contrast = enhancement === 3 ? 1.28 : 1.12;
   for (let index = 0; index < image.data.length; index += 4) {
     const gray =
@@ -200,48 +288,75 @@ function prepareImage(source) {
   return canvas;
 }
 
-function formatOcrResult(data) {
-  const words = (data.words || []).filter(
-    (word) => word.text?.trim() && Number(word.confidence) > 20
-  );
-  if (!words.length) return data.text?.trim() || "";
-
-  const lineMap = new Map();
-  words.forEach((word) => {
-    const key = `${word.block_num}-${word.par_num}-${word.line_num}`;
-    if (!lineMap.has(key)) lineMap.set(key, []);
-    lineMap.get(key).push(word);
-  });
-
-  const allLines = [...lineMap.values()].sort(
-    (a, b) => a[0].bbox.y0 - b[0].bbox.y0
-  );
-  const pageHeight = Math.max(...words.map((word) => word.bbox.y1));
-  const pageWidth = Math.max(...words.map((word) => word.bbox.x1));
-  const lines = $("#trim").checked
-    ? allLines.filter((line) => {
-        const top = Math.min(...line.map((word) => word.bbox.y0));
-        const bottom = Math.max(...line.map((word) => word.bbox.y1));
-        return top > pageHeight * 0.045 && bottom < pageHeight * 0.955;
-      })
-    : allLines;
-
-  return lines
-    .map((line) => {
-      line.sort((a, b) => a.bbox.x0 - b.bbox.x0);
-      const indent = $("#indent").checked
-        ? " ".repeat(Math.min(12, Math.round((line[0].bbox.x0 / pageWidth) * 12)))
-        : "";
-      return `${indent}${line.map((word) => word.text.trim()).join("")}`;
-    })
-    .join("\n");
+function cleanLineText(text) {
+  return text
+    .replace(/[|¦‖]+/g, "")
+    .replace(/[ \t]+/g, " ")
+    .trim();
 }
 
-async function recognizePage(page) {
+function collapseRepeatedChunks(text) {
+  return text.replace(/(.{3,12})\1+/g, "$1");
+}
+
+function formatOcrResult(data) {
+  const sourceLines = (data.lines || [])
+    .filter((line) => line.text?.trim() && Number(line.confidence ?? 100) > 18)
+    .map((line) => ({
+      text: collapseRepeatedChunks(cleanLineText(line.text)),
+      x: line.bbox?.x0 ?? 0,
+      y: line.bbox?.y0 ?? 0,
+      bottom: line.bbox?.y1 ?? line.bbox?.y0 ?? 0,
+      height: Math.max(1, (line.bbox?.y1 ?? 0) - (line.bbox?.y0 ?? 0))
+    }))
+    .filter((line) => line.text);
+
+  if (!sourceLines.length) return collapseRepeatedChunks(data.text?.trim() || "");
+
+  const pageHeight = Math.max(...sourceLines.map((line) => line.bottom));
+  const pageWidth = Math.max(...sourceLines.map((line) => line.x + line.text.length * 20));
+  const visibleLines = $("#trim").checked
+    ? sourceLines.filter((line) => line.y > pageHeight * 0.045 && line.bottom < pageHeight * 0.955)
+    : sourceLines;
+  const layout = $("#layout").value;
+  const rowTolerance = layout === "columns" ? 0.42 : 0.7;
+  const rows = [];
+
+  for (const line of visibleLines.sort((a, b) => a.y - b.y || a.x - b.x)) {
+    const row = rows.find((candidate) => Math.abs(candidate.y - line.y) <= line.height * rowTolerance);
+    if (row) row.lines.push(line);
+    else rows.push({ y: line.y, lines: [line] });
+  }
+
+  const orderedLines = rows.flatMap((row) => {
+    if (layout === "columns") {
+      const midpoint = pageWidth / 2;
+      return row.lines.sort((a, b) => {
+        const aColumn = a.x < midpoint ? 0 : 1;
+        const bColumn = b.x < midpoint ? 0 : 1;
+        return aColumn - bColumn || a.x - b.x;
+      });
+    }
+    return row.lines.sort((a, b) => a.x - b.x);
+  });
+
+  const result = [];
+  for (const line of orderedLines) {
+    const previous = result[result.length - 1];
+    if (previous && previous === line.text) continue;
+    const indent = $("#indent").checked
+      ? " ".repeat(Math.min(12, Math.round((line.x / pageWidth) * 12)))
+      : "";
+    result.push(`${indent}${line.text}`);
+  }
+  return result.join("\n");
+}
+
+async function recognizePage(page, activeWorker) {
   const canvas = page.sourceType === "pdf"
-    ? await renderPdfPage(page.pdf, page.pageNumber, 1.8)
+    ? await renderPdfPage(page.pdf, page.pageNumber, getOcrProfile().renderScale)
     : prepareImage(page.source);
-  const result = await worker.recognize(canvas);
+  const result = await activeWorker.recognize(canvas);
   canvas.width = 1;
   canvas.height = 1;
   return formatOcrResult(result.data);
@@ -267,41 +382,58 @@ async function runRecognition() {
 
   try {
     setStatus("正在加载中文识别模型，首次使用可能需要一些时间…");
-    worker = await tesseract.createWorker($("#lang").value, 1, {
+    const shouldParallelize =
+      pages.length > 4 &&
+      navigator.maxTouchPoints === 0 &&
+      (navigator.hardwareConcurrency || 2) >= 6;
+    const workerCount = shouldParallelize ? 2 : 1;
+    const results = new Array(pages.length).fill("");
+    const failures = [];
+let nextIndex = 0;
+    let completed = 0;
+
+    const createWorker = (workerNumber) => tesseract.createWorker($("#lang").value, 1, {
       logger: (message) => {
-        if (message.status === "loading language traineddata") {
-          setProgress(message.progress * 0.15, "正在加载中文识别模型…");
+        if (message.status === "loading language traineddata" && workerNumber === 0) {
+          setProgress(message.progress * 0.12, "正在加载中文识别模型…");
         }
         if (message.status === "recognizing text") {
-          progressText.textContent = "正在识别当前页面…";
+          progressText.textContent = `正在识别页面… 已完成 ${completed} / ${pages.length}`;
         }
       }
-    });
-    await worker.setParameters({
-      preserve_interword_spaces: "1",
-      user_defined_dpi: "300"
+    }).then(async (createdWorker) => {
+      const mode = $("#layout").value === "form" ? "11" : "6";
+      await createdWorker.setParameters({
+        preserve_interword_spaces: "1",
+        user_defined_dpi: getOcrProfile().renderScale < 1.5 ? "240" : "300",
+        tessedit_pageseg_mode: mode
+      });
+      return createdWorker;
     });
 
-    const results = [];
-    const failures = [];
-    for (let index = 0; index < pages.length; index += 1) {
-      const page = pages[index];
-      setProgress(index / pages.length, `正在识别第 ${index + 1} / ${pages.length} 页…`);
-      try {
-        const text = await recognizePage(page);
-        results.push(text);
-      } catch (error) {
-        failures.push(index + 1);
-        results.push("");
-        console.error(`第 ${index + 1} 页识别失败`, error);
+    workers = await Promise.all(Array.from({ length: workerCount }, (_, index) => createWorker(index)));
+
+    const processWorker = async (activeWorker) => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= pages.length) return;
+        try {
+          results[index] = await recognizePage(pages[index], activeWorker);
+        } catch (error) {
+          failures.push(index + 1);
+          console.error(`第 ${index + 1} 页识别失败`, error);
+        }
+        completed += 1;
+        output.value = results.join("\n\n");
+        updateChars();
+        setProgress(completed / pages.length, `已完成 ${completed} / ${pages.length} 页`);
       }
-      output.value = results.join("\n\n");
-      updateChars();
-      setProgress((index + 1) / pages.length, `已完成第 ${index + 1} / ${pages.length} 页`);
-    }
+    };
 
-    await worker.terminate();
-    worker = null;
+    await Promise.all(workers.map((activeWorker) => processWorker(activeWorker)));
+    await Promise.all(workers.map((activeWorker) => activeWorker.terminate()));
+    workers = [];
     const resultCount = results.filter(Boolean).length;
     if (failures.length) {
       setStatus(`识别完成：${resultCount} 页成功，${failures.length} 页失败`);
@@ -313,8 +445,8 @@ async function runRecognition() {
   } catch (error) {
     console.error("OCR 失败", error);
     setStatus(`识别失败：${error.message || "请刷新后重试"}`);
-    if (worker) await worker.terminate();
-    worker = null;
+    await Promise.all(workers.map((activeWorker) => activeWorker.terminate()));
+    workers = [];
   } finally {
     busy = false;
     progress.hidden = true;
