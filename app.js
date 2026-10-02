@@ -56,9 +56,9 @@ function imageDataUrl(file) {
 
 function getOcrProfile() {
   const profiles = {
-    fast: { renderScale: 1.35, maxPixels: 2200000 },
-    balanced: { renderScale: 1.58, maxPixels: 3200000 },
-    quality: { renderScale: 1.82, maxPixels: 5000000 }
+    fast: { renderScale: 1.5, maxPixels: 2800000 },
+    balanced: { renderScale: 1.7, maxPixels: 3800000 },
+    quality: { renderScale: 1.9, maxPixels: 5500000 }
   };
   return profiles[$("#speed").value] || profiles.fast;
 }
@@ -292,11 +292,27 @@ function cleanLineText(text) {
   return text
     .replace(/[|¦‖]+/g, "")
     .replace(/[ \t]+/g, " ")
+    .replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g, "$1")
+    .replace(/\s+([，。！？：；、）》】』」])/g, "$1")
+    .replace(/([（《【“『「])\s+/g, "$1")
     .trim();
 }
 
 function collapseRepeatedChunks(text) {
   return text.replace(/(.{3,12})\1+/g, "$1");
+}
+
+function joinLineText(previous, current) {
+  const left = previous.trimEnd();
+  const right = current.trimStart();
+  if (!left) return right;
+  if (!right) return left;
+  const leftChar = left[left.length - 1];
+  const rightChar = right[0];
+  if (/[A-Za-z0-9]$/.test(leftChar) && /^[A-Za-z0-9]/.test(rightChar)) {
+    return `${left} ${right}`;
+  }
+  return `${left}${right}`;
 }
 
 function formatOcrResult(data) {
@@ -311,7 +327,12 @@ function formatOcrResult(data) {
     }))
     .filter((line) => line.text);
 
-  if (!sourceLines.length) return collapseRepeatedChunks(data.text?.trim() || "");
+  if (!sourceLines.length) {
+    return {
+      text: collapseRepeatedChunks(data.text?.trim() || ""),
+      continues: false
+    };
+  }
 
   const pageHeight = Math.max(...sourceLines.map((line) => line.bottom));
   const pageWidth = Math.max(...sourceLines.map((line) => line.x + line.text.length * 20));
@@ -340,16 +361,72 @@ function formatOcrResult(data) {
     return row.lines.sort((a, b) => a.x - b.x);
   });
 
-  const result = [];
+  const baseX = [...orderedLines]
+    .map((line) => line.x)
+    .sort((a, b) => a - b)[Math.floor(orderedLines.length * 0.2)] ?? 0;
+  const indentThreshold = Math.max(12, pageWidth * 0.025);
+  const lineGaps = orderedLines
+    .slice(1)
+    .map((line, index) => Math.max(0, line.y - orderedLines[index].bottom))
+    .filter((gap) => gap > 0)
+    .sort((a, b) => a - b);
+  const normalGap = lineGaps[Math.floor(lineGaps.length * 0.5)] || 0;
+  const paragraphGap = Math.max(normalGap * 1.7, orderedLines[0]?.height * 0.9 || 0);
+  const paragraphs = [];
+  let current = null;
+
   for (const line of orderedLines) {
-    const previous = result[result.length - 1];
-    if (previous && previous === line.text) continue;
-    const indent = $("#indent").checked
-      ? " ".repeat(Math.min(12, Math.round((line.x / pageWidth) * 12)))
-      : "";
-    result.push(`${indent}${line.text}`);
+    const previousLine = current?.lastLine;
+    const gap = previousLine ? Math.max(0, line.y - previousLine.bottom) : 0;
+    const indented = line.x - baseX >= indentThreshold;
+    const startsParagraph = Boolean(
+      current &&
+      (layout === "form" || indented || (gap > paragraphGap && current.text.length > 12))
+    );
+
+    if (!current || startsParagraph) {
+      current = {
+        text: line.text,
+        firstX: line.x,
+        lastLine: line,
+        indented,
+        breakBefore: startsParagraph
+      };
+      paragraphs.push(current);
+    } else {
+      current.text = joinLineText(current.text, line.text);
+      current.lastLine = line;
+    }
   }
-  return result.join("\n");
+
+  const formatted = paragraphs
+    .filter((paragraph) => paragraph.text.trim())
+    .map((paragraph) => {
+      const text = paragraph.text.trim();
+      const shouldIndent =
+        $("#indent").checked &&
+        (paragraph.indented || paragraph.breakBefore) &&
+        layout !== "form";
+      return `${shouldIndent ? "　　" : ""}${text}`;
+    });
+
+  return {
+    text: formatted.join("\n"),
+    continues: !paragraphs[0]?.indented
+  };
+}
+
+function combinePageResults(results) {
+  let combined = "";
+  results.forEach((result) => {
+    if (!result?.text) return;
+    if (!combined) {
+      combined = result.text;
+      return;
+    }
+    combined += result.continues ? result.text : `\n${result.text}`;
+  });
+  return combined;
 }
 
 async function recognizePage(page, activeWorker) {
@@ -387,7 +464,7 @@ async function runRecognition() {
       navigator.maxTouchPoints === 0 &&
       (navigator.hardwareConcurrency || 2) >= 6;
     const workerCount = shouldParallelize ? 2 : 1;
-    const results = new Array(pages.length).fill("");
+    const results = new Array(pages.length).fill(null);
     const failures = [];
 let nextIndex = 0;
     let completed = 0;
@@ -425,7 +502,7 @@ let nextIndex = 0;
           console.error(`第 ${index + 1} 页识别失败`, error);
         }
         completed += 1;
-        output.value = results.join("\n\n");
+        output.value = combinePageResults(results);
         updateChars();
         setProgress(completed / pages.length, `已完成 ${completed} / ${pages.length} 页`);
       }
@@ -434,7 +511,7 @@ let nextIndex = 0;
     await Promise.all(workers.map((activeWorker) => processWorker(activeWorker)));
     await Promise.all(workers.map((activeWorker) => activeWorker.terminate()));
     workers = [];
-    const resultCount = results.filter(Boolean).length;
+    const resultCount = results.filter((result) => result?.text).length;
     if (failures.length) {
       setStatus(`识别完成：${resultCount} 页成功，${failures.length} 页失败`);
     } else if (resultCount) {
