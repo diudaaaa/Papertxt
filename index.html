@@ -42,9 +42,11 @@
           <section class="panel">
             <div class="title"><div><label>CONFIG</label><h2>识别设置</h2></div>☼</div>
             <label class="field">识别语言<select id="lang"><option value="chi_sim">简体中文</option><option value="chi_tra">繁体中文</option><option value="eng">English</option></select></label>
-            <label class="field">版面模式<select><option>小说排版 · 推荐</option><option>双栏书页</option></select></label>
+            <label class="field">版面模式<select id="layout"><option value="novel">小说排版 · 推荐</option><option value="columns">双栏书页</option><option value="form">表格 / 报表</option></select></label>
+            <label class="field">识别速度<select id="speed"><option value="fast">快速 · 推荐</option><option value="balanced">均衡</option><option value="quality">高质量</option></select></label>
             <label class="field">图像增强 <span id="scaleText">清晰</span><input id="scale" type="range" min="1" max="3" value="2"></label>
             <label class="check"><span><strong>自动去除页眉页脚</strong><small>减少页码与装饰文字干扰</small></span><input id="trim" type="checkbox" checked></label>
+            <label class="check"><span><strong>去除黑色边框和长线</strong><small>避免表格线干扰文字判断</small></span><input id="removeLines" type="checkbox" checked></label>
             <label class="check"><span><strong>保留段落缩进</strong><small>按原图坐标还原中文段首</small></span><input id="indent" type="checkbox" checked></label>
             <button class="recognize" id="recognize" disabled>✦　开始识别</button>
             <div id="progress" hidden><small id="progressText">准备中…</small><div><i id="bar"></i></div></div>
@@ -55,6 +57,6 @@
     </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script type="module" src="app.js?v=20261002-2"></script>
+  <script type="module" src="app.js?v=20261002-3"></script>
 </body>
 </html>
