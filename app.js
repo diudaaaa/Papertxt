@@ -1,4 +1,7 @@
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
+import { combinePageResults, formatOcrResult } from "./layout.mjs";
+import { findPictureRegions } from "./pictures.mjs";
+import { createWordBlob } from "./word.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
@@ -19,11 +22,13 @@ const bar = $("#bar");
 const progressText = $("#progressText");
 const copyButton = $("#copy");
 const downloadButton = $("#download");
+const wordButton = $("#downloadWord");
 
 const MAX_PREVIEW_PAGES = 48;
 let pages = [];
 let busy = false;
 let workers = [];
+let pageResults = [];
 
 function setStatus(message) {
   status.textContent = message;
@@ -33,6 +38,7 @@ function updateChars() {
   chars.textContent = `${output.value.length} 字`;
   copyButton.disabled = !output.value;
   downloadButton.disabled = !output.value;
+  wordButton.disabled = busy || !pageResults.some((result) => result?.elements?.length);
 }
 
 function setProgress(value, message) {
@@ -288,155 +294,56 @@ function prepareImage(source) {
   return canvas;
 }
 
-function cleanLineText(text) {
-  return text
-    .replace(/[|¦‖]+/g, "")
-    .replace(/[ \t]+/g, " ")
-    .replace(/([\u3400-\u9fff])\s+(?=[\u3400-\u9fff])/g, "$1")
-    .replace(/\s+([，。！？：；、）》】』」])/g, "$1")
-    .replace(/([（《【“『「])\s+/g, "$1")
-    .trim();
-}
-
-function collapseRepeatedChunks(text) {
-  return text.replace(/(.{3,12})\1+/g, "$1");
-}
-
-function joinLineText(previous, current) {
-  const left = previous.trimEnd();
-  const right = current.trimStart();
-  if (!left) return right;
-  if (!right) return left;
-  const leftChar = left[left.length - 1];
-  const rightChar = right[0];
-  if (/[A-Za-z0-9]$/.test(leftChar) && /^[A-Za-z0-9]/.test(rightChar)) {
-    return `${left} ${right}`;
-  }
-  return `${left}${right}`;
-}
-
-function formatOcrResult(data) {
-  const sourceLines = (data.lines || [])
-    .filter((line) => line.text?.trim() && Number(line.confidence ?? 100) > 18)
-    .map((line) => ({
-      text: collapseRepeatedChunks(cleanLineText(line.text)),
-      x: line.bbox?.x0 ?? 0,
-      y: line.bbox?.y0 ?? 0,
-      bottom: line.bbox?.y1 ?? line.bbox?.y0 ?? 0,
-      height: Math.max(1, (line.bbox?.y1 ?? 0) - (line.bbox?.y0 ?? 0))
-    }))
-    .filter((line) => line.text);
-
-  if (!sourceLines.length) {
-    return {
-      text: collapseRepeatedChunks(data.text?.trim() || ""),
-      continues: false
-    };
-  }
-
-  const pageHeight = Math.max(...sourceLines.map((line) => line.bottom));
-  const pageWidth = Math.max(...sourceLines.map((line) => line.x + line.text.length * 20));
-  const visibleLines = $("#trim").checked
-    ? sourceLines.filter((line) => line.y > pageHeight * 0.045 && line.bottom < pageHeight * 0.955)
-    : sourceLines;
-  const layout = $("#layout").value;
-  const rowTolerance = layout === "columns" ? 0.42 : 0.7;
-  const rows = [];
-
-  for (const line of visibleLines.sort((a, b) => a.y - b.y || a.x - b.x)) {
-    const row = rows.find((candidate) => Math.abs(candidate.y - line.y) <= line.height * rowTolerance);
-    if (row) row.lines.push(line);
-    else rows.push({ y: line.y, lines: [line] });
-  }
-
-  const orderedLines = rows.flatMap((row) => {
-    if (layout === "columns") {
-      const midpoint = pageWidth / 2;
-      return row.lines.sort((a, b) => {
-        const aColumn = a.x < midpoint ? 0 : 1;
-        const bColumn = b.x < midpoint ? 0 : 1;
-        return aColumn - bColumn || a.x - b.x;
-      });
-    }
-    return row.lines.sort((a, b) => a.x - b.x);
-  });
-
-  const baseX = [...orderedLines]
-    .map((line) => line.x)
-    .sort((a, b) => a - b)[Math.floor(orderedLines.length * 0.2)] ?? 0;
-  const indentThreshold = Math.max(12, pageWidth * 0.025);
-  const lineGaps = orderedLines
-    .slice(1)
-    .map((line, index) => Math.max(0, line.y - orderedLines[index].bottom))
-    .filter((gap) => gap > 0)
-    .sort((a, b) => a - b);
-  const normalGap = lineGaps[Math.floor(lineGaps.length * 0.5)] || 0;
-  const paragraphGap = Math.max(normalGap * 1.7, orderedLines[0]?.height * 0.9 || 0);
-  const paragraphs = [];
-  let current = null;
-
-  for (const line of orderedLines) {
-    const previousLine = current?.lastLine;
-    const gap = previousLine ? Math.max(0, line.y - previousLine.bottom) : 0;
-    const indented = line.x - baseX >= indentThreshold;
-    const startsParagraph = Boolean(
-      current &&
-      (layout === "form" || indented || (gap > paragraphGap && current.text.length > 12))
+async function capturePictures(canvas, lines) {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  const regions = findPictureRegions(
+    context.getImageData(0, 0, canvas.width, canvas.height),
+    lines,
+    canvas.width,
+    canvas.height
+  );
+  const pictures = [];
+  for (const region of regions) {
+    const crop = document.createElement("canvas");
+    crop.width = region.width;
+    crop.height = region.height;
+    crop.getContext("2d").drawImage(
+      canvas, region.x, region.y, region.width, region.height,
+      0, 0, region.width, region.height
     );
-
-    if (!current || startsParagraph) {
-      current = {
-        text: line.text,
-        firstX: line.x,
-        lastLine: line,
-        indented,
-        breakBefore: startsParagraph
-      };
-      paragraphs.push(current);
-    } else {
-      current.text = joinLineText(current.text, line.text);
-      current.lastLine = line;
-    }
-  }
-
-  const formatted = paragraphs
-    .filter((paragraph) => paragraph.text.trim())
-    .map((paragraph) => {
-      const text = paragraph.text.trim();
-      const shouldIndent =
-        $("#indent").checked &&
-        (paragraph.indented || paragraph.breakBefore) &&
-        layout !== "form";
-      return `${shouldIndent ? "　　" : ""}${text}`;
+    const blob = await new Promise((resolve) => crop.toBlob(resolve, "image/jpeg", 0.82));
+    if (blob) pictures.push({
+      x: region.x,
+      y: region.y,
+      width: region.width,
+      height: region.height,
+      bytes: new Uint8Array(await blob.arrayBuffer())
     });
-
-  return {
-    text: formatted.join("\n"),
-    continues: !paragraphs[0]?.indented
-  };
-}
-
-function combinePageResults(results) {
-  let combined = "";
-  results.forEach((result) => {
-    if (!result?.text) return;
-    if (!combined) {
-      combined = result.text;
-      return;
-    }
-    combined += result.continues ? result.text : `\n${result.text}`;
-  });
-  return combined;
+    crop.width = 1;
+    crop.height = 1;
+  }
+  return pictures;
 }
 
 async function recognizePage(page, activeWorker) {
   const canvas = page.sourceType === "pdf"
     ? await renderPdfPage(page.pdf, page.pageNumber, getOcrProfile().renderScale)
     : prepareImage(page.source);
-  const result = await activeWorker.recognize(canvas);
-  canvas.width = 1;
-  canvas.height = 1;
-  return formatOcrResult(result.data);
+  try {
+    const { data } = await activeWorker.recognize(canvas, {}, { blocks: true });
+    const result = formatOcrResult(data, { width: canvas.width, height: canvas.height }, {
+      trim: $("#trim").checked,
+      indent: $("#indent").checked,
+      layout: $("#layout").value
+    });
+    result.pictures = $("#includePictures").checked
+      ? await capturePictures(canvas, result.lines)
+      : [];
+    return result;
+  } finally {
+    canvas.width = 1;
+    canvas.height = 1;
+  }
 }
 
 async function runRecognition() {
@@ -446,6 +353,7 @@ async function runRecognition() {
   progress.hidden = false;
   bar.style.width = "0%";
   output.value = "";
+  pageResults = [];
   updateChars();
 
   const tesseract = globalThis.Tesseract;
@@ -465,8 +373,9 @@ async function runRecognition() {
       (navigator.hardwareConcurrency || 2) >= 6;
     const workerCount = shouldParallelize ? 2 : 1;
     const results = new Array(pages.length).fill(null);
+    pageResults = results;
     const failures = [];
-let nextIndex = 0;
+    let nextIndex = 0;
     let completed = 0;
 
     const createWorker = (workerNumber) => tesseract.createWorker($("#lang").value, 1, {
@@ -565,6 +474,37 @@ downloadButton.addEventListener("click", () => {
   link.download = "papertext-result.txt";
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+wordButton.addEventListener("click", async () => {
+  wordButton.disabled = true;
+  try {
+    setStatus("正在生成带配图的 Word 文档…");
+    if (!globalThis.docx) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdn.jsdelivr.net/npm/docx@9.6.1/dist/index.iife.js";
+        script.onload = resolve;
+        script.onerror = () => reject(new Error("Word 组件下载失败，请检查网络"));
+        document.head.append(script);
+      });
+    }
+    const blob = await createWordBlob(pageResults, globalThis.docx);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${(pages[0]?.name || "papertext").replace(/ · 第 \d+ 页$/, "").replace(/\.(pdf|png|jpe?g|webp)$/i, "")}.docx`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const pictureCount = pageResults.reduce((total, result) => total + (result?.pictures?.length || 0), 0);
+    setStatus(pictureCount
+      ? `Word 文档已生成，包含 ${pictureCount} 张检测到的配图`
+      : "Word 文档已生成；未检测到可分离的配图，请校对原页");
+  } catch (error) {
+    console.error("Word 导出失败", error);
+    setStatus(`Word 导出失败：${error.message}`);
+  } finally {
+    updateChars();
+  }
 });
 
 renderQueue();
