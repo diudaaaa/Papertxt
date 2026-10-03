@@ -8,7 +8,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=Noto+Serif+SC:wght@600;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
-  <style>.page-placeholder{width:46px;height:54px;display:grid;place-items:center;border:1px solid #ddd9d0;background:#f0eee7;color:#96938a;font:11px monospace}</style>
 </head>
 <body>
   <div class="shell">
@@ -33,7 +32,7 @@
             <div class="bottom"><span id="summary">还没有添加文件</span><button id="addMore">＋ 添加更多</button></div>
           </section>
           <section class="panel" id="result">
-            <div class="title"><div><label>02 / RESULT</label><h2>文字结果</h2></div><div><button id="copy" disabled>复制全文</button><button class="button compact" id="download" disabled>下载 TXT</button></div></div>
+            <div class="title"><div><label>02 / RESULT</label><h2>文字结果</h2></div><div><button id="copy" disabled>复制全文</button><button class="button compact" id="download" disabled>下载 TXT</button><button class="button compact" id="downloadWord" disabled>下载 Word</button></div></div>
             <div class="meta"><span id="status">等待开始识别</span><span id="chars">0 字</span></div>
             <textarea id="output" placeholder="识别后的文字会显示在这里，你可以直接校对和编辑。"></textarea>
           </section>
@@ -47,6 +46,7 @@
             <label class="field">图像增强 <span id="scaleText">清晰</span><input id="scale" type="range" min="1" max="3" value="2"></label>
             <label class="check"><span><strong>自动去除页眉页脚</strong><small>减少页码与装饰文字干扰</small></span><input id="trim" type="checkbox" checked></label>
             <label class="check"><span><strong>去除黑色边框和长线</strong><small>避免表格线干扰文字判断</small></span><input id="removeLines" type="checkbox" checked></label>
+            <label class="check"><span><strong>保留书中配图</strong><small>Word 中按图文顺序上下排列</small></span><input id="includePictures" type="checkbox" checked></label>
             <label class="check"><span><strong>保留段落缩进</strong><small>按原图坐标还原中文段首</small></span><input id="indent" type="checkbox" checked></label>
             <button class="recognize" id="recognize" disabled>✦　开始识别</button>
             <div id="progress" hidden><small id="progressText">准备中…</small><div><i id="bar"></i></div></div>
@@ -57,6 +57,6 @@
     </main>
   </div>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script type="module" src="app.js?v=20261002-4"></script>
+  <script type="module" src="app.js?v=20261003-3"></script>
 </body>
 </html>
