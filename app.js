@@ -1,7 +1,5 @@
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 import { combinePageResults, formatOcrResult } from "./layout.mjs";
-import { findPictureRegions } from "./pictures.mjs";
-import { createWordBlob } from "./word.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
@@ -22,15 +20,13 @@ const bar = $("#bar");
 const progressText = $("#progressText");
 const copyButton = $("#copy");
 const downloadButton = $("#download");
-const wordButton = $("#downloadWord");
+const layoutPreview = $("#layoutPreview");
+const previewPages = $("#previewPages");
 
 const MAX_PREVIEW_PAGES = 48;
 let pages = [];
 let busy = false;
-let exportingWord = false;
-let loadingFiles = false;
 let workers = [];
-let pageResults = [];
 
 function setStatus(message) {
   status.textContent = message;
@@ -40,12 +36,36 @@ function updateChars() {
   chars.textContent = `${output.value.length} 字`;
   copyButton.disabled = !output.value;
   downloadButton.disabled = !output.value;
-  wordButton.disabled = busy || exportingWord || !pageResults.some((result) => result?.elements?.length);
 }
 
-function invalidateWordResults() {
-  pageResults = [];
-  updateChars();
+function appendMarkedText(parent, text) {
+  const parts = text.split(/([①-⑳⓵-⓾])/u);
+  parts.forEach((part) => {
+    if (!part) return;
+    const span = document.createElement(/[①-⑳⓵-⓾]/u.test(part) ? "sup" : "span");
+    span.textContent = part;
+    parent.append(span);
+  });
+}
+
+function renderLayoutPreview(results) {
+  previewPages.replaceChildren();
+  results.forEach((result) => {
+    if (!result?.elements?.length) return;
+    const page = document.createElement("section");
+    page.className = "preview-page";
+    result.elements.forEach((element) => {
+      const paragraph = document.createElement(element.kind === "heading" ? "h3" : "p");
+      paragraph.className = `preview-${element.kind}`;
+      if (element.kind === "body" && element.indented && $("#indent").checked) {
+        paragraph.classList.add("preview-indent");
+      }
+      appendMarkedText(paragraph, element.text);
+      page.append(paragraph);
+    });
+    previewPages.append(page);
+  });
+  layoutPreview.hidden = !previewPages.childElementCount;
 }
 
 function setProgress(value, message) {
@@ -58,6 +78,15 @@ function fileKey(file) {
   return `${file.name}|${file.size}|${file.lastModified}`;
 }
 
+function imageDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
 function getOcrProfile() {
   const profiles = {
     fast: { renderScale: 1.5, maxPixels: 2800000 },
@@ -67,10 +96,10 @@ function getOcrProfile() {
   return profiles[$("#speed").value] || profiles.fast;
 }
 
-async function renderPdfPage(pdf, pageNumber, scale, options = {}) {
+async function renderPdfPage(pdf, pageNumber, scale) {
   const page = await pdf.getPage(pageNumber);
   const baseViewport = page.getViewport({ scale: 1 });
-  const maxPixels = options.maxPixels || getOcrProfile().maxPixels;
+  const maxPixels = getOcrProfile().maxPixels;
   const requestedPixels = baseViewport.width * baseViewport.height * scale * scale;
   const safeScale = requestedPixels > maxPixels
     ? scale * Math.sqrt(maxPixels / requestedPixels)
@@ -88,165 +117,65 @@ async function renderPdfPage(pdf, pageNumber, scale, options = {}) {
 }
 
 async function createPdfPages(file) {
-  const sourceUrl = URL.createObjectURL(file);
-  let loadingTask;
-  try {
-    loadingTask = pdfjsLib.getDocument({
-      url: sourceUrl,
-      disableAutoFetch: false,
-      disableStream: false,
-      rangeChunkSize: 1024 * 1024
-    });
-    const pdf = await loadingTask.promise;
-    return Array.from({ length: pdf.numPages }, (_, index) => ({
-      name: `${file.name} · 第 ${index + 1} 页`,
-      type: "PDF",
-      preview: "",
-      sourceType: "pdf",
-      pdf,
-      pageNumber: index + 1,
-      fileKey: fileKey(file),
-      sourceUrl
-    }));
-  } catch (error) {
-    loadingTask?.destroy?.();
-    URL.revokeObjectURL(sourceUrl);
-    if (file.size > 32 * 1024 * 1024) {
-      throw new Error(`PDF 读取失败（${formatBytes(file.size)}）。请确认文件未加密，并尝试使用 Chrome 或 Edge。`);
-    }
-    try {
-      const pdf = await pdfjsLib.getDocument({
-        data: await file.arrayBuffer(),
-        disableAutoFetch: false,
-        disableStream: false
-      }).promise;
-      return Array.from({ length: pdf.numPages }, (_, index) => ({
-        name: `${file.name} · 第 ${index + 1} 页`,
-        type: "PDF",
-        preview: "",
-        sourceType: "pdf",
-        pdf,
-        pageNumber: index + 1,
-        fileKey: fileKey(file),
-        sourceUrl: ""
-      }));
-    } catch (fallbackError) {
-      throw new Error(`PDF 读取失败：${fallbackError.message || error.message || "文件可能已损坏或加密"}`);
-    }
-  }
+  const loadingTask = pdfjsLib.getDocument({
+    data: await file.arrayBuffer(),
+    disableAutoFetch: false,
+    disableStream: false
+  });
+  const pdf = await loadingTask.promise;
+  const previewCanvas = await renderPdfPage(pdf, 1, 0.42);
+  const preview = previewCanvas.toDataURL("image/jpeg", 0.72);
+  previewCanvas.width = 1;
+  previewCanvas.height = 1;
+
+  return Array.from({ length: pdf.numPages }, (_, index) => ({
+    name: `${file.name} · 第 ${index + 1} 页`,
+    type: "PDF",
+    preview: index === 0 ? preview : "",
+    sourceType: "pdf",
+    pdf,
+    pageNumber: index + 1,
+    fileKey: fileKey(file)
+  }));
 }
 
 async function createImagePage(file) {
-  const sourceUrl = URL.createObjectURL(file);
-  try {
-    return {
-      name: file.name,
-      type: file.type.split("/")[1]?.toUpperCase() || "IMAGE",
-      preview: sourceUrl,
-      sourceType: "image",
-      file,
-      sourceUrl,
-      fileKey: fileKey(file)
-    };
-  } catch (error) {
-    URL.revokeObjectURL(sourceUrl);
-    throw error;
-  }
-}
-
-function schedulePdfPreview(page) {
-  window.setTimeout(async () => {
-    if (!pages.includes(page) || page.preview || loadingFiles || busy || exportingWord) return;
-    try {
-      const previewCanvas = await renderPdfPage(page.pdf, page.pageNumber, 0.34, {
-        maxPixels: 520000
-      });
-      page.preview = previewCanvas.toDataURL("image/jpeg", 0.72);
-      previewCanvas.width = 1;
-      previewCanvas.height = 1;
-      if (pages.includes(page)) renderQueue();
-    } catch (error) {
-      console.warn("缩略图生成失败", error);
-    }
-  }, 400);
-}
-
-function releasePageResource(page) {
-  if (!page) return;
-  if (page.sourceType === "image") {
-    if (page.sourceUrl) URL.revokeObjectURL(page.sourceUrl);
-  }
-}
-
-function releasePdfResource(page) {
-  page?.pdf?.destroy?.();
-  if (page?.sourceUrl) URL.revokeObjectURL(page.sourceUrl);
-}
-
-window.addEventListener("beforeunload", () => {
-  const seenPdfs = new Set();
-  for (const page of pages) {
-    if (page.sourceType === "image") releasePageResource(page);
-    if (page.sourceType === "pdf" && !seenPdfs.has(page.pdf)) {
-      seenPdfs.add(page.pdf);
-      releasePdfResource(page);
-    }
-  }
-});
-
-function isPdfFile(file) {
-  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
-}
-
-function formatBytes(bytes) {
-  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return {
+    name: file.name,
+    type: file.type.split("/")[1]?.toUpperCase() || "IMAGE",
+    preview: await imageDataUrl(file),
+    sourceType: "image",
+    source: await createImageBitmap(file),
+    fileKey: fileKey(file)
+  };
 }
 
 async function addFiles(fileList) {
-  if (busy || exportingWord || loadingFiles) return;
   const files = [...fileList];
   if (!files.length) return;
-  loadingFiles = true;
-  input.disabled = true;
-  $("#addMore").disabled = true;
-  renderQueue();
-  try {
-    for (const file of files) {
-      if (pages.some((page) => page.fileKey === fileKey(file))) {
-        setStatus(`已跳过重复文件：${file.name}`);
-        continue;
-      }
 
-      try {
-        setStatus(`正在读取 ${formatBytes(file.size)} 文件：${file.name}`);
-        if (isPdfFile(file)) {
-          const newPages = await createPdfPages(file);
-          pages.push(...newPages);
-          invalidateWordResults();
-          renderQueue();
-          setStatus(`已读取 ${newPages.length} 页，可开始识别：${file.name}`);
-        } else if (file.type.startsWith("image/")) {
-          pages.push(await createImagePage(file));
-          invalidateWordResults();
-          setStatus(`已添加图片：${file.name}`);
-        } else {
-          setStatus(`不支持此文件：${file.name}`);
-        }
-      } catch (error) {
-        setStatus(`读取失败：${error.message || file.name}`);
-      }
-      renderQueue();
+  for (const file of files) {
+    if (pages.some((page) => page.fileKey === fileKey(file))) {
+      setStatus(`已跳过重复文件：${file.name}`);
+      continue;
     }
-  } finally {
-    loadingFiles = false;
-    input.disabled = false;
-    $("#addMore").disabled = false;
-    input.value = "";
+
+    try {
+      setStatus(`正在读取：${file.name}`);
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        const newPages = await createPdfPages(file);
+        pages.push(...newPages);
+        setStatus(`已读取 ${newPages.length} 页：${file.name}`);
+      } else if (file.type.startsWith("image/")) {
+        pages.push(await createImagePage(file));
+        setStatus(`已添加图片：${file.name}`);
+      }
+    } catch (error) {
+      setStatus(`读取失败：${error.message || file.name}`);
+    }
     renderQueue();
-    const firstPdfPage = pages.find((page) => page.sourceType === "pdf" && !page.preview);
-    if (firstPdfPage) schedulePdfPreview(firstPdfPage);
   }
+  input.value = "";
 }
 
 function renderQueue() {
@@ -254,7 +183,7 @@ function renderQueue() {
   summary.textContent = pages.length
     ? `${pages.length} 个页面等待处理${pages.length > MAX_PREVIEW_PAGES ? "，列表仅显示前 48 页" : ""}`
     : "还没有添加文件";
-  recognizeButton.disabled = !pages.length || busy || exportingWord || loadingFiles;
+  recognizeButton.disabled = !pages.length || busy;
   empty.hidden = Boolean(pages.length);
   queue.querySelectorAll(".queue-item").forEach((item) => item.remove());
 
@@ -270,22 +199,16 @@ function renderQueue() {
         <strong>${page.name}</strong>
         <small>第 ${index + 1} 页 · ${page.type}</small>
       </div>
-      <button class="remove" data-index="${index}" title="移除页面" ${busy || exportingWord || loadingFiles ? "disabled" : ""}>×</button>
+      <button class="remove" data-index="${index}" title="移除页面">×</button>
     `;
     queue.append(item);
   });
 
   queue.querySelectorAll(".remove").forEach((button) => {
     button.addEventListener("click", () => {
-      if (busy || exportingWord || loadingFiles) return;
       const index = Number(button.dataset.index);
       const removed = pages.splice(index, 1)[0];
-      releasePageResource(removed);
-      if (removed?.sourceType === "pdf" &&
-        !pages.some((page) => page.pdf === removed.pdf)) {
-        releasePdfResource(removed);
-      }
-      invalidateWordResults();
+      if (removed?.sourceType === "image") removed.source.close?.();
       renderQueue();
     });
   });
@@ -374,15 +297,11 @@ function prepareImage(source) {
   canvas.width = Math.max(1, Math.round(source.width * ratio));
   canvas.height = Math.max(1, Math.round(source.height * ratio));
   const context = canvas.getContext("2d", { willReadFrequently: true });
-  context.imageSmoothingEnabled = true;
   context.drawImage(source, 0, 0, canvas.width, canvas.height);
-
-  const enhancement = Number($("#scale").value);
-  const needsPixelWork = $("#removeLines").checked || enhancement !== 1;
-  if (!needsPixelWork) return canvas;
 
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   removeLongLines(image, canvas.width, canvas.height);
+  const enhancement = Number($("#scale").value);
   if (enhancement === 1) {
     context.putImageData(image, 0, 0);
     return canvas;
@@ -402,112 +321,38 @@ function prepareImage(source) {
   return canvas;
 }
 
-async function capturePictures(canvas, lines, pageWidth, pageHeight) {
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  const regions = findPictureRegions(
-    context.getImageData(0, 0, canvas.width, canvas.height),
-    lines,
-    pageWidth,
-    pageHeight
-  );
-  const pictures = [];
-  for (const region of regions) {
-    const crop = document.createElement("canvas");
-    crop.width = region.width;
-    crop.height = region.height;
-    crop.getContext("2d").drawImage(
-      canvas, region.x, region.y, region.width, region.height,
-      0, 0, region.width, region.height
-    );
-    const blob = await new Promise((resolve) => crop.toBlob(resolve, "image/jpeg", 0.82));
-    if (blob) pictures.push({
-      x: region.x * pageWidth / canvas.width,
-      y: region.y * pageHeight / canvas.height,
-      width: region.width,
-      height: region.height,
-      bytes: new Uint8Array(await blob.arrayBuffer())
-    });
-    crop.width = 1;
-    crop.height = 1;
-  }
-  return pictures;
-}
-
-async function renderSourcePage(page) {
-  if (page.sourceType === "pdf") {
-    return renderPdfPage(page.pdf, page.pageNumber, getOcrProfile().renderScale);
-  }
-  const bitmap = await createImageBitmap(page.file);
-  try {
-    return prepareImage(bitmap);
-  } finally {
-    bitmap.close?.();
-  }
-}
-
 async function recognizePage(page, activeWorker) {
-  const canvas = await renderSourcePage(page);
+  const canvas = page.sourceType === "pdf"
+    ? await renderPdfPage(page.pdf, page.pageNumber, getOcrProfile().renderScale)
+    : prepareImage(page.source);
   try {
-    const { data } = await activeWorker.recognize(canvas, {}, {
-      blocks: true
-    });
-    const result = formatOcrResult(data, { width: canvas.width, height: canvas.height }, {
+    const { data } = await activeWorker.recognize(canvas, {}, { blocks: true });
+    return formatOcrResult(data, { width: canvas.width, height: canvas.height }, {
       trim: $("#trim").checked,
       indent: $("#indent").checked,
       layout: $("#layout").value
     });
-    result.pageHeight = canvas.height;
-    return result;
   } finally {
     canvas.width = 1;
     canvas.height = 1;
   }
 }
 
-async function collectPicturesForWord() {
-  if (!$("#includePictures").checked) return 0;
-  const candidates = pageResults
-    .map((result, index) => ({ result, page: pages[index] }))
-    .filter(({ result, page }) => result?.lines?.length && page);
-  let pictureCount = 0;
-  for (let index = 0; index < candidates.length; index += 1) {
-    const { result, page } = candidates[index];
-    if (result.pictures) {
-      pictureCount += result.pictures.length;
-      setProgress((index + 1) / candidates.length, `正在扫描配图… ${index + 1} / ${candidates.length} 页`);
-      continue;
-    }
-    const canvas = await renderSourcePage(page);
-    try {
-      result.pictures = await capturePictures(canvas, result.lines, result.pageWidth, result.pageHeight);
-      pictureCount += result.pictures.length;
-    } finally {
-      canvas.width = 1;
-      canvas.height = 1;
-    }
-    setProgress((index + 1) / candidates.length, `正在扫描配图… ${index + 1} / ${candidates.length} 页`);
-  }
-  return pictureCount;
-}
-
 async function runRecognition() {
-  if (busy || exportingWord || loadingFiles || !pages.length) return;
+  if (busy || !pages.length) return;
   busy = true;
-  input.disabled = true;
-  $("#addMore").disabled = true;
   renderQueue();
   progress.hidden = false;
   bar.style.width = "0%";
   output.value = "";
-  pageResults = [];
+  layoutPreview.hidden = true;
+  previewPages.replaceChildren();
   updateChars();
 
   const tesseract = globalThis.Tesseract;
   if (!tesseract?.createWorker) {
     setStatus("OCR 引擎加载失败，请刷新页面后重试");
     busy = false;
-    input.disabled = false;
-    $("#addMore").disabled = false;
     progress.hidden = true;
     renderQueue();
     return;
@@ -521,12 +366,9 @@ async function runRecognition() {
       (navigator.hardwareConcurrency || 2) >= 6;
     const workerCount = shouldParallelize ? 2 : 1;
     const results = new Array(pages.length).fill(null);
-    pageResults = results;
     const failures = [];
     let nextIndex = 0;
     let completed = 0;
-    let lastLoggerUpdate = 0;
-    let lastOutputUpdate = 0;
 
     const createWorker = (workerNumber) => tesseract.createWorker($("#lang").value, 1, {
       logger: (message) => {
@@ -534,11 +376,7 @@ async function runRecognition() {
           setProgress(message.progress * 0.12, "正在加载中文识别模型…");
         }
         if (message.status === "recognizing text") {
-          const now = Date.now();
-          if (now - lastLoggerUpdate > 250) {
-            progressText.textContent = `正在识别页面… 已完成 ${completed} / ${pages.length}`;
-            lastLoggerUpdate = now;
-          }
+          progressText.textContent = `正在识别页面… 已完成 ${completed} / ${pages.length}`;
         }
       }
     }).then(async (createdWorker) => {
@@ -565,12 +403,9 @@ async function runRecognition() {
           console.error(`第 ${index + 1} 页识别失败`, error);
         }
         completed += 1;
-        const now = Date.now();
-        if (completed === pages.length || now - lastOutputUpdate > 1200) {
-          output.value = combinePageResults(results);
-          updateChars();
-          lastOutputUpdate = now;
-        }
+        output.value = combinePageResults(results);
+        renderLayoutPreview(results);
+        updateChars();
         setProgress(completed / pages.length, `已完成 ${completed} / ${pages.length} 页`);
       }
     };
@@ -578,8 +413,6 @@ async function runRecognition() {
     await Promise.all(workers.map((activeWorker) => processWorker(activeWorker)));
     await Promise.all(workers.map((activeWorker) => activeWorker.terminate()));
     workers = [];
-    output.value = combinePageResults(results);
-    updateChars();
     const resultCount = results.filter((result) => result?.text).length;
     if (failures.length) {
       setStatus(`识别完成：${resultCount} 页成功，${failures.length} 页失败`);
@@ -595,8 +428,6 @@ async function runRecognition() {
     workers = [];
   } finally {
     busy = false;
-    input.disabled = false;
-    $("#addMore").disabled = false;
     progress.hidden = true;
     renderQueue();
     updateChars();
@@ -613,7 +444,6 @@ zone.addEventListener("dragleave", () => zone.classList.remove("drag"));
 zone.addEventListener("drop", (event) => {
   event.preventDefault();
   zone.classList.remove("drag");
-  if (busy || exportingWord || loadingFiles) return;
   addFiles(event.dataTransfer.files);
 });
 recognizeButton.addEventListener("click", runRecognition);
@@ -638,51 +468,5 @@ downloadButton.addEventListener("click", () => {
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
-wordButton.addEventListener("click", async () => {
-  if (exportingWord || busy) return;
-  exportingWord = true;
-  input.disabled = true;
-  $("#addMore").disabled = true;
-  wordButton.disabled = true;
-  recognizeButton.disabled = true;
-  progress.hidden = false;
-  setProgress(0, "正在准备 Word 文档…");
-  try {
-    setStatus("正在准备 Word 文档…");
-    const pictureCount = await collectPicturesForWord();
-    if (!globalThis.docx) {
-      await new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = "https://cdn.jsdelivr.net/npm/docx@9.6.1/dist/index.iife.js";
-        script.onload = resolve;
-        script.onerror = () => reject(new Error("Word 组件下载失败，请检查网络"));
-        document.head.append(script);
-      });
-    }
-    const blob = await createWordBlob(pageResults, globalThis.docx);
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${(pages[0]?.name || "papertext").replace(/ · 第 \d+ 页$/, "").replace(/\.(pdf|png|jpe?g|webp)$/i, "")}.docx`;
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-    setStatus(pictureCount
-      ? `Word 文档已生成，包含 ${pictureCount} 张检测到的配图`
-      : $("#includePictures").checked
-        ? "Word 文档已生成；未检测到可分离的配图，请校对原页"
-        : "Word 文档已生成");
-  } catch (error) {
-    console.error("Word 导出失败", error);
-    setStatus(`Word 导出失败：${error.message}`);
-  } finally {
-    exportingWord = false;
-    input.disabled = false;
-    $("#addMore").disabled = false;
-    progress.hidden = true;
-    renderQueue();
-    updateChars();
-  }
-});
-
 renderQueue();
 updateChars();
